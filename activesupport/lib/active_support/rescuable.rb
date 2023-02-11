@@ -49,7 +49,7 @@ module ActiveSupport
       #
       # Exceptions raised inside exception handlers are not propagated up.
       def rescue_from(*klasses, with: nil, &block)
-        unless with
+        unless with&.present?
           if block_given?
             with = block
           else
@@ -88,8 +88,8 @@ module ActiveSupport
       def rescue_with_handler(exception, object: self, visited_exceptions: [])
         visited_exceptions << exception
 
-        if handler = handler_for_rescue(exception, object: object)
-          handler.call exception
+        if handlers = handlers_for_rescue(exception, object: object)
+          handlers.each { |handler| handler.call exception }
           exception
         elsif exception
           if visited_exceptions.include?(exception.cause)
@@ -100,37 +100,42 @@ module ActiveSupport
         end
       end
 
-      def handler_for_rescue(exception, object: self) #:nodoc:
-        case rescuer = find_rescue_handler(exception)
-        when Symbol
-          method = object.method(rescuer)
-          if method.arity == 0
-            -> e { method.call }
-          else
-            method
-          end
-        when Proc
-          if rescuer.arity == 0
-            -> e { object.instance_exec(&rescuer) }
-          else
-            -> e { object.instance_exec(e, &rescuer) }
+      def handlers_for_rescue(exception, object: self) #:nodoc:
+        handlers = find_rescue_handlers(exception)
+        return unless handlers.present?
+
+        handlers.map do |handler|
+          case handler
+          when Symbol
+            method = object.method(handler)
+            if method.arity == 0
+              -> e { method.call }
+            else
+              method
+            end
+          when Proc
+            if handler.arity == 0
+              -> e { object.instance_exec(&handler) }
+            else
+              -> e { object.instance_exec(e, &handler) }
+            end
           end
         end
       end
 
       private
-        def find_rescue_handler(exception)
+        def find_rescue_handlers(exception)
           if exception
             # Handlers are in order of declaration but the most recently declared
             # is the highest priority match, so we search for matching handlers
             # in reverse.
-            _, handler = rescue_handlers.reverse_each.detect do |class_or_name, _|
+            _, handlers = rescue_handlers.reverse_each.detect do |class_or_name, _|
               if klass = constantize_rescue_handler_class(class_or_name)
                 klass === exception
               end
             end
 
-            handler
+            [*handlers]
           end
         end
 
@@ -168,7 +173,7 @@ module ActiveSupport
     # Internal handler lookup. Delegates to class method. Some libraries call
     # this directly, so keeping it around for compatibility.
     def handler_for_rescue(exception) #:nodoc:
-      self.class.handler_for_rescue exception, object: self
+      self.class.handlers_for_rescue exception, object: self
     end
   end
 end
